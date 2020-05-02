@@ -1,0 +1,156 @@
+/**
+Description 		:	Batch Handler Class
+Created Date		:	24/12/2019.
+Author	 			: 	KoteswaraRao
+Batch Class			: 	PUB_ReferralToOpportunityBatch
+Last Modified by	: 	KoteswaraRao
+Last Modified Date	:   31/12/2019
+*/
+public class PUB_ReferralToOpportunityBatch_Handler {
+    Public static void refrralToOpportunityBatchExecute(List<Lead> lstRefs, Database.BatchableContext BC){
+        //For Debugs Store
+        List <Application_Log__c> logList = new List<Application_Log__c>();
+        String jobId = BC.getJobId();
+        DateTime startTime = DateTime.now();
+        
+        //Get Custom Metadata type Values from PUB_RefToOptyTwinFieldsCustMetaData wrapper class
+        PUB_TwineFieldsCustomMetaDataWrapper.custMetaDatMappingWrapper wrap = PUB_TwineFieldsCustomMetaDataWrapper.getCustomMetaDataTypeRecs();
+        
+        //Map Opportunity twin fields as keyset and Referral twin fields as Values
+        Map<string,string> Oppty_Map = wrap.OptyToRefMap;
+        //Fetch Referral twin fields
+        List<String> refFlds = wrap.RefFields;
+        //Fetch Opportunity twin fields
+        List<String> optyFlds = wrap.OptyFields;
+        
+        set<id> upDatedOptyIDs = new set<id>();
+        //Map of Referral with Opportunity for Update using Custom Metadata type
+        Map<Lead,Opportunity> leadOptyMap = new Map<Lead,Opportunity>();
+        //For Update final Referrals
+        List<Lead> upDateLeads = new List<Lead>();
+        //For Update final Opportunity
+        List<Opportunity> upDateOpp = new List<Opportunity>();
+        
+        try{
+            set<id> leadUserids=new set<id>();
+            //Check Scope Contains Records
+            if(!lstRefs.isEmpty() && lstRefs.size()>0){
+                //initialize Opportunity to add Map
+                Opportunity opVal;
+                for(Lead lVal: lstRefs){
+                    leadUserids.add(lVal.OwnerId);
+                    //Check Referral Contains opportunity
+                    if(lVal.Opportunity__r != null){
+                        //Add Map of Referral with Opportunity
+                        leadOptyMap.put(lval,lVal.Opportunity__r);
+                    }
+                }
+            }
+            
+            Map<id,User> mapUserIds = new Map<id,User>();
+            List<User> lstUsers =[Select id,UserName FROM User where id in:leadUserids and Profile.name='PUB Retail Restricted Banker'];
+            for(User u : lstUsers){
+                mapUserIds.put(u.Id, u);
+            }
+            
+            // Check Map of Referral with Opportunity 
+            // Update Opportunity with Referral Twin fields
+            Object value;
+            if(!leadOptyMap.isEmpty()){
+                for(Lead obj : leadOptyMap.keyset()){
+                    Opportunity updtOpty = leadOptyMap.get(obj);
+                    if(mapUserIds.containskey(obj.OwnerId)){
+                        if(!Oppty_Map.isEmpty()){
+                            for(string key:Oppty_Map.keyset()){
+                                if(key == 'OwnerId'){
+                                    value = updtOpty.OwnerId;
+                                }else{
+                                    value = (Object)obj.get(Oppty_Map.get(key));
+                                }
+                                if (value != null) {
+                                    updtOpty.put(key, value);
+                                } 
+                            }
+                        }
+                    }else{
+                        //Check Map of Opportunity with Referral twine fields
+                        if(!Oppty_Map.isEmpty()){
+                            for(string key:Oppty_Map.keyset()){
+                                //Add modified twine field value of Referral to object 
+                                value  = (Object)obj.get(Oppty_Map.get(key));
+                                //Update twine field key with value
+                                if(value != null){
+                                    updtOpty.put(key,value);
+                                }
+                            }
+                        }
+                    }
+                    
+                    //Update list of Opportunities to Final Opportunity
+                    upDateOpp.add(updtOpty);
+                }
+            }
+            //Check Update Opportunity list contains values
+            if(upDateOpp.size()>0){
+                //Stop the trigger whenever batch class is running
+                RecursiveTriggerHandler.isOpportunityUpdate = false;
+                Database.SaveResult[] srList = Database.update(upDateOpp, false);
+                // Iterate through each returned result
+                for(Integer i=0;i<srList.size();i++){
+                    if (!srList.get(i).isSuccess()){
+                        // DML operation failed
+                        Database.Error error = srList.get(i).getErrors().get(0);
+                        String failedDML = error.getMessage();
+                        //listOFContactToUpdate.get(i);//failed record from the list
+                        Application_Log__c log = PUB_ChimeraServices.createLog(startTime, failedDML , 'Opportunity Twine Fields', 'System', 'PUB_ReferralToOpportunityBatch - Opportunity Update Twine Fields', UserInfo.getUserId());
+                        log.Record_ID__c = upDateOpp.get(i).id;
+                        log.Failure__c = true;
+                        log.Async_Apex_Job_Id__c = jobId;
+                        log.Resolution__c = 'Unkown Failure Exception - PUB_ReferralToOpportunityBatch';
+                        logList.add(log);
+                    }else{
+                        upDatedOptyIDs.add(upDateOpp.get(i).id);  
+                    }
+                }   
+            }
+            if(upDatedOptyIDs.size()>0){
+                String query = 'SELECT Id,Name,Opportunity__c,Modified_Flag__c From Lead where Opportunity__c IN:upDatedOptyIDs';
+                List<Lead> UpdateModifiedReferrals = Database.query(query);
+                for(Lead leadVal: UpdateModifiedReferrals){
+                    leadVal.Modified_Flag__c = false;
+                    upDateLeads.add(leadVal);
+                }
+            }
+            // Update Referral With Modified flag as false
+            if(upDateLeads.size()>0){
+                //Update Final Referral
+                RecursiveTriggerHandler.isLeadUpdate = false;
+                //Database.update(upDateLeads);
+                Database.SaveResult[] srList = Database.update(upDateLeads, false);
+                // Iterate through each returned result
+                for(Integer i=0;i<srList.size();i++){
+                    if (!srList.get(i).isSuccess()){
+                        // DML operation failed
+                        Database.Error error = srList.get(i).getErrors().get(0);
+                        String failedDML = error.getMessage();
+                        //listOFContactToUpdate.get(i);//failed record from the list
+                        Application_Log__c log = PUB_ChimeraServices.createLog(startTime, failedDML , 'Modified Flag', 'System', 'PUB_ReferralToOpportunityBatch - Lead Update Modified Flag', UserInfo.getUserId());
+                        log.Record_ID__c = upDateLeads.get(i).id;
+                        log.Failure__c = true;
+                        log.Async_Apex_Job_Id__c = jobId;
+                        log.Resolution__c = 'Unkown Failure Exception - PUB_ReferralToOpportunityBatch';
+                        logList.add(log);
+                    }
+                }   
+            }
+            //insert debug logs
+            if(logList.size() > 0){
+                database.insert(logList,false);
+            }   
+        }
+        catch( QueryException e ) {
+            System.debug('Exception : '+ e.getMessage());
+        }
+    }
+    
+}
